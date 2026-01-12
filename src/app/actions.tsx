@@ -7,8 +7,9 @@ import { z } from 'zod';
 import { supabase } from '@/lib/supabase';
 import { RevenueChart } from '@/components/dashboard/RevenueChart';
 import { SalesTable } from '@/components/dashboard/SalesTable';
+import { saveMessage } from '@/app/actions/history'; 
 
-export async function submitUserMessage(input: string) {
+export async function submitUserMessage(input: string, chatId: string) {
   'use server';
 
   const ui = createStreamableUI(
@@ -19,6 +20,9 @@ export async function submitUserMessage(input: string) {
 
   (async () => {
     try {
+      // --- SAVE USER MESSAGE ---
+      await saveMessage(chatId, 'user', 'text', input);
+
       // 1. FETCH & CLEAN SCHEMA
       const { data: schemaData } = await supabase.rpc('get_user_schema_details');
 
@@ -31,6 +35,7 @@ export async function submitUserMessage(input: string) {
           tables[row.table_name].push(`${row.column_name} (${row.data_type})`);
         });
 
+        // Format for AI context
         userSchemaContext = Object.entries(tables).map(([name, cols]) => {
           return `- Table '${name}': Columns [ ${cols.join(', ')} ]`;
         }).join('\n');
@@ -60,16 +65,22 @@ export async function submitUserMessage(input: string) {
           1. **Pick the Right Table:** If multiple versions exist, ALWAYS use the one with the LARGEST timestamp suffix.
           
           2. **Data Types (ALL TEXT):** - **Numbers:** "SUM(NULLIF(col, '')::numeric)"
-             - **Dates:** The user data likely uses 'DD-MM-YYYY' format (e.g., 15-01-2024).
+             - **Dates:** The user data likely uses 'DD-MM-YYYY' format.
                - WRONG: "col::date"
                - CORRECT: "to_date(NULLIF(date_col, ''), 'DD-MM-YYYY')"
 
-          3. **No Empty Queries:** You MUST call 'visualize_data' with a valid SQL string.
+          3. **Multi-Table Math (CRITICAL):**
+             - NEVER do "FROM table1, table2" (Cross Join). It multiplies the results!
+             - **CORRECT:** Use independent subqueries for each total.
+               Example: "SELECT (SELECT SUM(...) FROM sales) - (SELECT SUM(...) FROM marketing) AS result"
+
+          4. **No Empty Queries:** You MUST call 'visualize_data' with a valid SQL string.
         `,
         prompt: input,
         tools: {
           visualize_data: {
             description: 'Execute SQL and show the result.',
+            // Flexible parameters to catch AI inconsistencies
             parameters: z.object({
               query: z.string().optional().describe('The SQL query'),
               sql: z.string().optional().describe('Alternative parameter'),
@@ -78,14 +89,14 @@ export async function submitUserMessage(input: string) {
             generate: async (args) => {
                console.log("🤖 Tool Args Received:", JSON.stringify(args));
 
-               // @ts-ignore 
+               // @ts-ignore - Handle variable parameter names
                let query = args.query || args.sql || args.sql_query;
 
                if (!query) {
                  return <div className="text-red-500">Error: No query generated.</div>;
                }
 
-               // --- THE FIX: REMOVE TRAILING SEMICOLON ---
+               // CLEANUP: Remove trailing semicolons to prevent "syntax error at or near ;"
                query = query.trim().replace(/;$/, '');
                
                console.log("🚀 Executing:", query);
@@ -118,8 +129,14 @@ export async function submitUserMessage(input: string) {
                    value: row[valueKey]
                  }));
                  
+                 // Save Chart to History
+                 await saveMessage(chatId, 'assistant', 'chart', 'Chart Generated', formattedData);
+
                  return <RevenueChart title="Analysis Result" data={formattedData} />;
                }
+
+               // Save Table to History
+               await saveMessage(chatId, 'assistant', 'table', 'Table Generated', data);
 
                return <SalesTable title="Query Results" rows={data} />;
             }
