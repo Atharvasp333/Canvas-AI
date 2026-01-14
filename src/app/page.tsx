@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useUIState, useActions } from 'ai/rsc';
 import type { AI } from '@/app/context/ai';
 import { Send } from 'lucide-react';
@@ -8,7 +8,7 @@ import { CsvUploader } from '@/components/csv-uploader';
 import { DataManager } from "@/components/DataManager";
 import { ChatHistory } from "@/components/ChatHistory";
 import { createChat, getChatMessages } from '@/app/actions/history';
-import { RevenueChart } from '@/components/dashboard/RevenueChart';
+import { DynamicChart } from '@/components/dashboard/DynamicChart'; // Use the new DynamicChart
 import { SalesTable } from '@/components/dashboard/SalesTable';
 
 export default function Chat() {
@@ -16,30 +16,59 @@ export default function Chat() {
   const [messages, setMessages] = useUIState<typeof AI>();
   const { submitUserMessage } = useActions();
   
-  // State for History
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
 
-  // HYDRATION: When clicking a chat history item, load and render it
   const handleSelectChat = async (id: string) => {
     setCurrentChatId(id);
     const dbMessages = await getChatMessages(id);
     
-    // Convert DB data -> React UI Components
+    // HYDRATION LOGIC
     const uiMessages = dbMessages.map((msg: any) => {
       let display;
       
       if (msg.role === 'user') {
         display = <div className="ml-auto bg-blue-600 text-white px-5 py-3 rounded-2xl rounded-tr-none max-w-[80%] mb-4 text-right shadow-sm">{msg.content}</div>;
       } else {
-        // Assistant Message
+        // --- FIX STARTS HERE ---
         if (msg.type === 'text') {
-           // Fallback for old plain text errors
-           display = <div className="text-gray-500">{msg.content || "No content"}</div>;
-        } else if (msg.type === 'chart') {
-           display = <RevenueChart title="Analysis Result" data={msg.data} />;
-        } else if (msg.type === 'table') {
+           display = <div className="text-gray-600 bg-white p-4 rounded-xl shadow-sm border">{msg.content}</div>;
+        } 
+        else if (msg.type === 'chart') {
+           // CASE 1: It's a Dashboard (Array of Charts)
+           if (Array.isArray(msg.data) && msg.data.length > 0 && msg.data[0].chartType) {
+             display = (
+               <div className={`grid gap-4 w-full ${msg.data.length > 1 ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'}`}>
+                 {msg.data.map((chart: any, idx: number) => (
+                   <DynamicChart 
+                     key={idx}
+                     title={chart.title}
+                     data={chart.data}
+                     chartType={chart.chartType} // TypeScript might complain, ignore or cast
+                     description={chart.description}
+                   />
+                 ))}
+               </div>
+             );
+           } 
+           // CASE 2: It's a Single Chart (Saved as Object { data: [], type: '...' })
+           else if (msg.data && !Array.isArray(msg.data) && msg.data.data) {
+             display = (
+               <DynamicChart 
+                 title={msg.content || "Analysis"} 
+                 data={msg.data.data} 
+                 chartType={msg.data.type || 'bar'} 
+               />
+             );
+           }
+           // CASE 3: Legacy Fallback (Old simple array data)
+           else {
+             display = <DynamicChart title="Analysis" data={msg.data} chartType="bar" />;
+           }
+        } 
+        else if (msg.type === 'table') {
            display = <SalesTable title="Query Results" rows={msg.data} />;
         }
+        // --- FIX ENDS HERE ---
       }
 
       return {
@@ -103,7 +132,6 @@ export default function Chat() {
                 e.preventDefault();
                 if (!inputValue.trim()) return;
 
-                // 1. Ensure we have a Chat ID (Create one if new)
                 let activeId = currentChatId;
                 if (!activeId) {
                   const newChat = await createChat(inputValue);
@@ -113,7 +141,6 @@ export default function Chat() {
                   }
                 }
 
-                // 2. UI Optimistic Update
                 setMessages((curr) => [
                     ...curr,
                     {
@@ -125,7 +152,6 @@ export default function Chat() {
                 const value = inputValue;
                 setInputValue('');
 
-                // 3. Submit with Chat ID
                 if (activeId) {
                    const responseMessage = await submitUserMessage(value, activeId);
                    setMessages((curr) => [...curr, responseMessage]);
